@@ -1,0 +1,198 @@
+# Full pipeline: train on all data, gate for real, build, deploy, verify.
+#
+# Only reachable manually or on a merge that touches the model or the service, so
+# routine documentation commits do not trigger a retrain and a redeploy.
+
+name: Train and deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      skip_gate:
+        description: "Deploy even if the gate fails (requires a written reason in the run notes)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never interrupt a deployment mid-flight
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  AZURE_RESOURCE_GROUP: rg-flight-delay
+  CONTAINER_APP: ca-flightdelay
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # required for OIDC federation to Azure
+
+jobs:
+  train:
+    name: Train and gate
+    runs-on: ubuntu-latest
+    outputs:
+      gate_passed: ${{ steps.gate.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e ".[serve,dev]"
+
+      - name: Cache raw BTS archives
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: bts-${{ hashFiles('src/flight_delay/data/bts.py') }}-2025q1
+
+      - name: Build dataset
+        run: .venv/bin/python -m flight_delay.data.build --months 2025-01 2025-02 2025-03 2025-04
+
+      - name: Train on all data
+        run: .venv/bin/python -m flight_delay.train --backend local --run-name "ci-${{ github.sha }}"
+
+      # The champion's metrics are downloaded from the last successful deployment so
+      # the gate can compare against what is actually serving traffic, not against a
+      # file committed to the repo that would drift out of date.
+      - name: Fetch current production metrics
+        continue-on-error: true
+        run: |
+          gh run download --repo "$GITHUB_REPOSITORY" \
+            --name production-metrics --dir models/ 2>/dev/null \
+            && mv models/candidate_metrics.json models/production_metrics.json 2>/dev/null \
+            || echo "No champion on record; this run will become the first."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Deployment gate
+        id: gate
+        continue-on-error: ${{ inputs.skip_gate == true }}
+        run: .venv/bin/python -m flight_delay.evaluate
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: models/
+          retention-days: 30
+
+  build-and-deploy:
+    name: Build image and deploy
+    runs-on: ubuntu-latest
+    needs: train
+    if: needs.train.outputs.gate_passed == 'true' || inputs.skip_gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the gated model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: models/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Federated credentials: GitHub presents a signed OIDC token and Azure trusts it
+      # for this repository only. No client secret exists to rotate or leak.
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the new image
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "${IMAGE_NAME}:${{ github.sha }}" \
+            --output none
+
+      - name: Wait for the new revision to serve traffic
+        run: |
+          URL=$(az containerapp show --name "$CONTAINER_APP" \
+                 --resource-group "$AZURE_RESOURCE_GROUP" \
+                 --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Deployed to https://$URL"
+          echo "APP_URL=https://$URL" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 20 "https://$URL/health" | grep -q '"status":"ok"'; then
+              echo "Healthy after $attempt attempt(s)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Service did not become healthy within 5 minutes"
+          exit 1
+
+      # A container that answers /health can still be serving a broken model, so the
+      # smoke test asserts on a real prediction before the deployment is called good.
+      - name: Smoke test a real prediction
+        run: |
+          BODY=$(curl -fsS --max-time 30 -X POST "$APP_URL/api/predict" \
+            -H "Content-Type: application/json" \
+            -d '{"carrier":"AA","origin":"JFK","dest":"LAX","flight_date":"2025-07-15","dep_hour":17}')
+          echo "$BODY"
+          python -c "
+          import json,sys
+          d = json.loads('''$BODY''')
+          p = d['delay_probability']
+          assert 0.01 < p < 0.95, f'implausible probability {p}'
+          assert d['route'] == 'JFK-LAX'
+          print(f'Smoke test passed: {p:.1%}')
+          "
+
+      # Recorded only after the deployment is verified, so the next run compares
+      # against a model that genuinely reached production.
+      - name: Record the new champion
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-metrics
+          path: models/candidate_metrics.json
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed"
+            echo ""
+            echo "- URL: $APP_URL"
+            echo "- Image: \`${IMAGE_NAME}:${{ github.sha }}\`"
+            echo ""
+            echo '```json'
+            cat models/candidate_metrics.json | head -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

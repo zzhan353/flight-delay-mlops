@@ -1,0 +1,122 @@
+# Monthly drift and decay check.
+#
+# BTS publishes each month's on-time data with roughly a two-month lag, so this runs
+# on the 15th when the newest archive is reliably available. Unusually for a production
+# ML system, the ground truth arrives with the new data, so this checks whether the
+# model is still *right* rather than only whether the inputs have moved.
+
+name: Monitor drift
+
+on:
+  schedule:
+    - cron: "0 6 15 * *" # 15th of each month, 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      current_month:
+        description: "Month to evaluate (YYYY-MM)"
+        required: true
+      reference_month:
+        description: "Month the deployed model was trained on (YYYY-MM)"
+        default: "2025-01"
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  drift:
+    name: Score last month against ground truth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[serve,dev]"
+
+      - name: Resolve months
+        id: months
+        run: |
+          if [ -n "${{ inputs.current_month }}" ]; then
+            echo "current=${{ inputs.current_month }}" >> "$GITHUB_OUTPUT"
+            echo "reference=${{ inputs.reference_month }}" >> "$GITHUB_OUTPUT"
+          else
+            # Two months back: the most recent month BTS has certainly published.
+            echo "current=$(date -u -d '2 months ago' +%Y-%m)" >> "$GITHUB_OUTPUT"
+            echo "reference=2025-01" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the deployed model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: models/
+        continue-on-error: true
+
+      - name: Build both months
+        run: |
+          .venv/bin/python -m flight_delay.data.build \
+            --months "${{ steps.months.outputs.reference }}" "${{ steps.months.outputs.current }}"
+
+      - name: Drift report
+        id: drift
+        continue-on-error: true
+        run: |
+          REF="data/processed/flights_$(echo ${{ steps.months.outputs.reference }} | tr '-' '_').parquet"
+          CUR="data/processed/flights_$(echo ${{ steps.months.outputs.current }} | tr '-' '_').parquet"
+          .venv/bin/python -m flight_delay.monitor --reference "$REF" --current "$CUR" \
+            | tee drift_output.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drift-report
+          path: |
+            models/drift_report.json
+            drift_output.txt
+          retention-days: 90
+
+      # An issue is opened only on genuine performance decay, not on input drift alone.
+      # See flight_delay/monitor.py for why: seasonal temperature shift produces PSI
+      # above 3.0 every spring while the model's accuracy is unchanged, and an alert
+      # that cries wolf every year is an alert nobody reads.
+      - name: Open a retraining issue
+        if: steps.drift.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('models/drift_report.json', 'utf8'));
+            const output = fs.readFileSync('drift_output.txt', 'utf8');
+            const month = '${{ steps.months.outputs.current }}';
+
+            const body = [
+              `The deployed model has decayed against ground truth for **${month}**.`,
+              '',
+              '## Alerts',
+              ...report.alerts.map(a => `- ${a}`),
+              '',
+              '## Report',
+              '```',
+              output.trim(),
+              '```',
+              '',
+              '## Next step',
+              'Run the **Train and deploy** workflow. The gate compares the retrained',
+              'model against the current champion, so a retrain that does not actually',
+              'help will be blocked rather than shipped.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Model decay detected for ${month}`,
+              body,
+              labels: ['mlops', 'retrain-needed'],
+            });

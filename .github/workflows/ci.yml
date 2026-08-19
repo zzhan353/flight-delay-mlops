@@ -1,0 +1,98 @@
+# Pull-request checks.
+#
+# The goal is a signal in under five minutes, so this trains on a 25% sample rather
+# than the full three months. That is enough to catch the failures a PR actually
+# introduces — a broken pipeline, a leaked column, a crashed encoder — while the full
+# train and the real gate run on merge to main.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint-and-test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e ".[serve,dev]"
+
+      - name: Lint
+        run: |
+          .venv/bin/ruff check src tests
+          .venv/bin/ruff format --check src tests
+
+      - name: Unit tests
+        # Network-marked tests hit BTS and NOAA; they run in the training job, which
+        # already needs that data, rather than twice.
+        run: .venv/bin/pytest -m "not network" --cov=flight_delay --cov-report=term-missing
+
+  train-and-gate:
+    name: Train on a sample and run the gate
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e ".[serve,dev]"
+
+      # BTS publishes immutable monthly archives, so a hit is always valid and saves
+      # ~80 MB of download on every run.
+      - name: Cache raw BTS archives
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: bts-${{ hashFiles('src/flight_delay/data/bts.py') }}-2025q1
+
+      - name: Build dataset
+        run: .venv/bin/python -m flight_delay.data.build --months 2025-01 2025-02 2025-03
+
+      - name: Train
+        run: .venv/bin/python -m flight_delay.train --backend local --sample-frac 0.25
+
+      - name: Deployment gate
+        # On a sample the model is weaker than the full-data run, so the gate runs with
+        # relaxed thresholds here. Its job on a PR is to catch a pipeline that produces
+        # a broken model, not to make the ship/no-ship decision — that happens on main.
+        run: |
+          .venv/bin/python -m flight_delay.evaluate \
+            --min-decile-lift 1.03 \
+            --min-pr-auc-floor 0.98 \
+            --max-ece 0.05
+
+      - name: API smoke test against the freshly trained model
+        run: .venv/bin/pytest tests/test_serve.py -v
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-metrics
+          path: models/candidate_metrics.json
+          retention-days: 14
