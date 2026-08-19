@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+data/raw/
+data/processed/
+data/interim/
+mlruns/
+models/
+.env
+.coverage
+htmlcov/
+.ruff_cache/
+.pytest_cache/
+mlflow.db
+.claude/

@@ -1,0 +1,12 @@
+.venv/
+data/
+mlruns/
+tests/
+.git/
+.github/
+infra/
+*.md
+!README.md
+.pytest_cache/
+.ruff_cache/
+__pycache__/

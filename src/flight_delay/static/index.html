@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Delay Prediction</title>
+<style>
+  :root {
+    --bg: #f7f8f9; --surface: #fff; --ink: #16191d; --ink-soft: #4b545d;
+    --ink-mute: #79838d; --line: #dfe4e8; --accent: #1f6f8b; --accent-soft: #e6f0f4;
+    --low: #2f7d4f; --mid: #b07d17; --high: #b3452c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101315; --surface: #181c1f; --ink: #e7ebee; --ink-soft: #b0b9c0;
+      --ink-mute: #7d878f; --line: #2b3237; --accent: #5fa8c4; --accent-soft: #16303a;
+      --low: #6fbb84; --mid: #d5a83f; --high: #e0806a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 28px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 10px;
+  }
+  h1 { font-size: clamp(24px, 5vw, 34px); margin: 0 0 8px; letter-spacing: -.02em; }
+  .sub { color: var(--ink-soft); margin: 0; font-size: 15px; }
+  form {
+    background: var(--surface); border: 1px solid var(--line); padding: 22px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px;
+  }
+  label { display: block; font-size: 12px; font-weight: 600; color: var(--ink-soft);
+          margin-bottom: 5px; letter-spacing: .02em; }
+  select, input {
+    width: 100%; padding: 9px 10px; font-size: 14px; font-family: inherit;
+    background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 3px;
+  }
+  select:focus, input:focus, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
+  }
+  .full { grid-column: 1 / -1; }
+  button {
+    width: 100%; padding: 12px; font-size: 15px; font-weight: 600; font-family: inherit;
+    background: var(--accent); color: #fff; border: 0; border-radius: 3px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .55; cursor: progress; }
+  #result { margin-top: 24px; }
+  .card { background: var(--surface); border: 1px solid var(--line); padding: 24px; }
+  .prob { font-size: 52px; font-weight: 700; line-height: 1; letter-spacing: -.03em;
+          font-variant-numeric: tabular-nums; }
+  .prob.low { color: var(--low); } .prob.mid { color: var(--mid); } .prob.high { color: var(--high); }
+  .band { font-size: 15px; color: var(--ink-soft); margin-top: 6px; }
+  .band b { color: var(--ink); }
+  .bar { position: relative; height: 30px; background: var(--bg); border: 1px solid var(--line);
+         margin: 22px 0 8px; }
+  .bar .fill { height: 100%; background: var(--accent); opacity: .75; }
+  .bar .marker { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); }
+  .bar-key { display: flex; justify-content: space-between; font-family: var(--mono);
+             font-size: 11px; color: var(--ink-mute); }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+           gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 22px; }
+  .facts div { background: var(--surface); padding: 12px 14px; }
+  .facts dt { font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+              text-transform: uppercase; color: var(--ink-mute); margin: 0 0 3px; }
+  .facts dd { margin: 0; font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .disclosure {
+    margin-top: 24px; padding: 16px 18px; background: var(--accent-soft);
+    border: 1px solid var(--line); font-size: 13.5px; color: var(--ink-soft);
+  }
+  .disclosure b { color: var(--ink); }
+  .err { border-left: 3px solid var(--high); padding-left: 14px; color: var(--high); font-size: 14px; }
+  footer { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line);
+           font-size: 12.5px; color: var(--ink-mute); font-family: var(--mono); line-height: 1.8; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Portfolio project &middot; MLOps on Azure</p>
+    <h1>Will this flight arrive late?</h1>
+    <p class="sub">
+      Probability that a US domestic flight lands 15+ minutes behind schedule &mdash; the
+      official BTS definition of a delay. Trained on 2.2M flights.
+    </p>
+  </header>
+
+  <form id="form">
+    <div>
+      <label for="carrier">Airline</label>
+      <select id="carrier" required></select>
+    </div>
+    <div>
+      <label for="origin">From</label>
+      <select id="origin" required></select>
+    </div>
+    <div>
+      <label for="dest">To</label>
+      <select id="dest" required></select>
+    </div>
+    <div>
+      <label for="date">Date</label>
+      <input type="date" id="date" required>
+    </div>
+    <div>
+      <label for="hour">Departure time</label>
+      <select id="hour" required></select>
+    </div>
+    <div class="full">
+      <button type="submit" id="go">Estimate delay risk</button>
+    </div>
+  </form>
+
+  <div id="result"></div>
+
+  <footer>
+    Model: gradient boosting + isotonic calibration &middot; ROC-AUC <span id="auc">&mdash;</span>
+    &middot; served from a scale-to-zero container<br>
+    Data: US DOT Bureau of Transportation Statistics, NOAA &middot;
+    <a href="https://github.com/" id="repo">source &amp; architecture notes</a>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let BASE_RATE = 0.196;
+
+async function boot() {
+  const ref = await (await fetch("/api/reference")).json();
+  BASE_RATE = ref.base_rate;
+
+  ref.carriers.forEach(c => $("carrier").add(new Option(`${c.name} (${c.code})`, c.code)));
+  ref.airports.forEach(a => $("origin").add(new Option(`${a.code} — ${a.city}`, a.code)));
+
+  for (let h = 0; h < 24; h++) {
+    const label = new Date(2000, 0, 1, h).toLocaleTimeString([], {hour: "numeric"});
+    $("hour").add(new Option(label, h));
+  }
+
+  const d = new Date(); d.setDate(d.getDate() + 7);
+  $("date").value = d.toISOString().slice(0, 10);
+  $("hour").value = 17;
+  $("origin").value = "ORD";
+  await loadDests();
+}
+
+async function loadDests() {
+  const origin = $("origin").value;
+  const { destinations } = await (await fetch(`/api/routes/${origin}`)).json();
+  $("dest").innerHTML = "";
+  destinations.forEach(code => $("dest").add(new Option(code, code)));
+  // Only routes with scheduled service are offered, so the form cannot produce a 404.
+  if (destinations.includes("LGA")) $("dest").value = "LGA";
+}
+
+$("origin").addEventListener("change", loadDests);
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("go").disabled = true; $("go").textContent = "Estimating…";
+  try {
+    const resp = await fetch("/api/predict", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        carrier: $("carrier").value, origin: $("origin").value, dest: $("dest").value,
+        flight_date: $("date").value, dep_hour: Number($("hour").value),
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "Prediction failed");
+    render(data);
+  } catch (err) {
+    $("result").innerHTML = `<div class="card"><p class="err">${err.message}</p></div>`;
+  } finally {
+    $("go").disabled = false; $("go").textContent = "Estimate delay risk";
+  }
+});
+
+function render(d) {
+  const pct = (d.delay_probability * 100).toFixed(1);
+  const basePct = (d.base_rate * 100).toFixed(1);
+  const tone = d.relative_risk < 0.9 ? "low" : d.relative_risk < 1.4 ? "mid" : "high";
+  // The bar is scaled to 50% rather than 100%: almost every prediction lands under a
+  // third, and a 0-100 axis would make every flight look identically safe.
+  const width = Math.min(d.delay_probability / 0.5 * 100, 100);
+  const markerAt = Math.min(d.base_rate / 0.5 * 100, 100);
+
+  $("auc").textContent = d.model_quality.roc_auc;
+  $("result").innerHTML = `
+    <div class="card">
+      <div class="prob ${tone}">${pct}%</div>
+      <div class="band">
+        chance of arriving 15+ min late on <b>${d.route}</b> —
+        <b>${d.band}</b> (${d.relative_risk}× the typical flight)
+      </div>
+      <div class="bar">
+        <div class="fill" style="width:${width}%"></div>
+        <div class="marker" style="left:${markerAt}%" title="average flight"></div>
+      </div>
+      <div class="bar-key"><span>0%</span><span>▲ average ${basePct}%</span><span>50%</span></div>
+      <dl class="facts">
+        <div><dt>This flight</dt><dd>${pct}%</dd></div>
+        <div><dt>Average flight</dt><dd>${basePct}%</dd></div>
+        <div><dt>Relative risk</dt><dd>${d.relative_risk}×</dd></div>
+      </dl>
+      <div class="disclosure">
+        <b>How much to trust this.</b> The model reaches ROC-AUC
+        ${d.model_quality.roc_auc} and flags high-risk flights
+        ${d.model_quality.top_decile_lift}× better than the base rate — a real but modest
+        edge over simply looking up how often that airline is late from that airport at
+        that hour. It sees the schedule and the season, not today's air traffic, crew
+        rotations or the inbound aircraft, which is what actually makes flights late.
+        Calibration error is ${d.model_quality.calibration_error}, so the percentage is
+        roughly honest at the population level. <b>Not travel advice.</b>
+      </div>
+    </div>`;
+}
+
+boot();
+</script>
+</body>
+</html>
