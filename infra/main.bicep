@@ -182,6 +182,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       scale: {
         minReplicas: minReplicas
         maxReplicas: maxReplicas
+        // Stay warm for 30 minutes after the last request instead of the 5-minute
+        // default. Idle replicas are billed, but a visitor who arrives while the
+        // service is asleep waits through a cold start, and someone reading a resume
+        // rarely waits. 30 minutes covers a browsing session and an interview demo
+        // without paying to run continuously.
+        cooldownPeriod: 1800
         rules: [
           {
             name: 'http-concurrency'

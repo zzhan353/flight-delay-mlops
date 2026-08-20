@@ -2,7 +2,7 @@
 
 install:
 	uv venv --python 3.11 .venv
-	uv pip install -e ".[serve,dev]"
+	uv pip install -e ".[serve,train,dev]"
 
 lint:
 	.venv/bin/ruff check src tests

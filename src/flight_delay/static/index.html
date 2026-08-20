@@ -77,6 +77,17 @@
   }
   .disclosure b { color: var(--ink); }
   .err { border-left: 3px solid var(--high); padding-left: 14px; color: var(--high); font-size: 14px; }
+  .waking { display: flex; gap: 14px; align-items: flex-start; }
+  .spinner {
+    flex: none; width: 18px; height: 18px; margin-top: 3px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  .waking p { margin: 0 0 6px; font-size: 14px; }
+  .waking .why { font-size: 13px; color: var(--ink-soft); margin: 0; }
+  .elapsed { font-family: var(--mono); font-size: 12px; color: var(--ink-mute); }
   footer { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line);
            font-size: 12.5px; color: var(--ink-mute); font-family: var(--mono); line-height: 1.8; }
   footer a { color: var(--accent); }
@@ -131,10 +142,22 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// The same file is served two ways: from GitHub Pages (where the API lives on another
+// origin) and from the container itself during local development (where it does not).
+// Deciding by hostname keeps one copy of the page rather than a build step.
+const API_BASE = location.hostname.endsWith("github.io")
+  ? "https://ca-flightdelay.salmonbush-4ca37403.eastus.azurecontainerapps.io"
+  : "";
+
 let BASE_RATE = 0.196;
+let wakingInterval = null;
 
 async function boot() {
-  const ref = await (await fetch("/api/reference")).json();
+  // Fetching the reference data is itself the warm-up: it lands while the visitor is
+  // still reading the page and choosing an airline, so by the time they press the
+  // button the container is usually already running.
+  const ref = await (await fetch(`${API_BASE}/api/reference`)).json();
   BASE_RATE = ref.base_rate;
 
   ref.carriers.forEach(c => $("carrier").add(new Option(`${c.name} (${c.code})`, c.code)));
@@ -154,7 +177,7 @@ async function boot() {
 
 async function loadDests() {
   const origin = $("origin").value;
-  const { destinations } = await (await fetch(`/api/routes/${origin}`)).json();
+  const { destinations } = await (await fetch(`${API_BASE}/api/routes/${origin}`)).json();
   $("dest").innerHTML = "";
   destinations.forEach(code => $("dest").add(new Option(code, code)));
   // Only routes with scheduled service are offered, so the form cannot produce a 404.
@@ -166,8 +189,36 @@ $("origin").addEventListener("change", loadDests);
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("go").disabled = true; $("go").textContent = "Estimating…";
+
+  // The service scales to zero when idle, so the first request after a quiet period
+  // waits for a container to start. Showing a bare spinner for 30 seconds reads as a
+  // broken page; naming the cause — and the deliberate cost trade behind it — turns
+  // the wait into something the visitor can understand rather than abandon.
+  const started = Date.now();
+  const wakingTimer = setTimeout(() => {
+    $("result").innerHTML = `
+      <div class="card waking">
+        <div class="spinner"></div>
+        <div>
+          <p><b>Waking the service up…</b> <span class="elapsed" id="tick">0s</span></p>
+          <p class="why">
+            This demo scales to zero when nobody is using it, so it costs nothing to
+            keep online. The first request after an idle period starts a container,
+            which takes about half a minute. Every request after that answers in
+            under a second.
+          </p>
+        </div>
+      </div>`;
+    const tick = setInterval(() => {
+      const el = $("tick");
+      if (!el) return clearInterval(tick);
+      el.textContent = `${Math.round((Date.now() - started) / 1000)}s`;
+    }, 1000);
+    wakingInterval = tick;
+  }, 1200);   // only if it is actually slow — a warm service never shows this
+
   try {
-    const resp = await fetch("/api/predict", {
+    const resp = await fetch(`${API_BASE}/api/predict`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
@@ -181,6 +232,8 @@ $("form").addEventListener("submit", async (e) => {
   } catch (err) {
     $("result").innerHTML = `<div class="card"><p class="err">${err.message}</p></div>`;
   } finally {
+    clearTimeout(wakingTimer);
+    if (wakingInterval) { clearInterval(wakingInterval); wakingInterval = null; }
     $("go").disabled = false; $("go").textContent = "Estimate delay risk";
   }
 });

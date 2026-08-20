@@ -26,12 +26,12 @@ import logging
 import sys
 from pathlib import Path
 
-import mlflow.sklearn
 import numpy as np
 import pandas as pd
 
 from flight_delay.features import xy
 from flight_delay.metrics import evaluate
+from flight_delay.model_io import load_model
 from flight_delay.schema import NUMERIC_FEATURES, TARGET
 
 log = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def compare(reference: pd.DataFrame, current: pd.DataFrame) -> dict[str, float]:
 
 def score_current(model_dir: Path, current: pd.DataFrame) -> dict[str, float]:
     """Evaluate the deployed model against last month's ground truth."""
-    model = mlflow.sklearn.load_model(str(model_dir))
+    model = load_model(model_dir)
     X, y = xy(current)
     return evaluate(y, model.predict_proba(X)[:, 1])
 

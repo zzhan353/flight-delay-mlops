@@ -2,6 +2,11 @@
 
 Design notes that matter for the hosting budget and for honesty:
 
+* **The serving image carries only inference dependencies.** See `model_io.py`: the
+  model is loaded with the standard library rather than through MLflow, which keeps
+  ~110 MB of training-only packages out of an image that gets pulled on every cold
+  start.
+
 * **The model is baked into the image, not fetched at startup.** Container Apps scales
   this service to zero, so every cold start pays the model-load cost. Pulling the
   artifact from a registry at boot would add seconds and a network failure mode to a
@@ -31,11 +36,13 @@ from importlib import resources
 from pathlib import Path
 from typing import Annotated
 
-import mlflow.sklearn
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+
+from flight_delay.model_io import load_model
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +65,7 @@ def load_reference() -> dict:
 async def lifespan(app: FastAPI):
     started = time.perf_counter()
     state["reference"] = load_reference()
-    state["model"] = mlflow.sklearn.load_model(str(MODEL_DIR))
+    state["model"] = load_model(MODEL_DIR)
     metrics_path = MODEL_DIR.parent / "candidate_metrics.json"
     state["metrics"] = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
     state["loaded_in_ms"] = round((time.perf_counter() - started) * 1000, 1)
@@ -73,6 +80,25 @@ app = FastAPI(
     description="Probability that a US domestic flight arrives 15+ minutes late.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+
+# The demo page is served from GitHub Pages, which is always on, while this API scales
+# to zero. That split is what keeps the page itself instant: a visitor sees the form
+# immediately and only waits for a cold start when they ask for a prediction, at which
+# point the UI can explain the wait. Serving the page from the container instead meant
+# staring at a blank tab for the full startup.
+#
+# Origins are listed explicitly rather than using "*", so only the published demo can
+# call this API from a browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://zzhan353.github.io",
+        "http://localhost:8000",
+    ],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 

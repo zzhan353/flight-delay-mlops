@@ -38,7 +38,7 @@ jobs:
       - name: Install
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[serve,dev]"
+          uv pip install -e ".[serve,train,dev]"
 
       - name: Resolve months
         id: months

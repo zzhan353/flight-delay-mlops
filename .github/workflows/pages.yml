@@ -1,0 +1,48 @@
+# Publish the demo page to GitHub Pages.
+#
+# The page is static and always available; the API it calls scales to zero. Splitting
+# them is what makes the demo usable: a visitor sees the form instantly instead of
+# waiting through a container cold start before any HTML arrives, and the page can
+# explain the wait when it does happen on the first prediction.
+
+name: Publish demo page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/flight_delay/static/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site
+          cp src/flight_delay/static/index.html site/
+          # Pages runs Jekyll by default, which ignores files it does not understand.
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
