@@ -1,6 +1,6 @@
 # Flight Delay MLOps
 
-**[Live demo](https://ca-flightdelay.agreeablecliff-946f3f42.eastus.azurecontainerapps.io)** &middot;
+**[Live demo](https://zzhan353.github.io/flight-delay-mlops/)** &middot;
 predicts the probability that a US domestic flight arrives 15+ minutes late.
 
 Trained on 2.2M flights from the US DOT Bureau of Transportation Statistics, joined
