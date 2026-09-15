@@ -11,7 +11,11 @@ requires-python = ">=3.11"
 # parquet I/O) and mlflow (110 MB with matplotlib, PIL, SQLAlchemy in tow) were half
 # the image and are never imported while answering a request.
 dependencies = [
-    "pandas>=2.2",
+    # Capped below 3: with pyarrow installed (the train extra), pandas 3 stores strings
+    # as pyarrow arrays, so the pickled pipeline needs pyarrow to load. The serving image
+    # leaves pyarrow out on purpose (see model_io.py), and a model trained under pandas 3
+    # crashed every replica on startup. Lift the cap together with that decision.
+    "pandas>=2.2,<3",
     "scikit-learn>=1.5",
     "pydantic>=2.9",
 ]

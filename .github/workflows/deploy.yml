@@ -106,6 +106,48 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Build into the local daemon and start the image the way Container Apps will,
+      # before anything is pushed. The gate above scores the model inside the training
+      # environment, which has every optional dependency installed; the serving image
+      # deliberately does not. When a pandas 3 upgrade made the pickled pipeline depend
+      # on pyarrow, the gate passed and every replica crashed on startup. Pushing only
+      # after the image has loaded its own model keeps `:latest` from ever pointing at
+      # an image that cannot start.
+      - name: Build image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: flight-delay:candidate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start the image and serve a prediction
+        run: |
+          docker run -d --name candidate -p 8000:8000 flight-delay:candidate
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://localhost:8000/health | grep -q '"status":"ok"'; then
+              echo "Healthy after $attempt attempt(s)."
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' candidate)" != "true" ]; then
+              echo "::error::Container exited during startup"
+              docker logs candidate
+              exit 1
+            fi
+            sleep 2
+          done
+          if ! curl -fsS --max-time 5 http://localhost:8000/health | grep -q '"status":"ok"'; then
+            echo "::error::Image did not become healthy within 60 seconds"
+            docker logs candidate
+            exit 1
+          fi
+          curl -fsS --max-time 20 -X POST http://localhost:8000/api/predict \
+            -H "Content-Type: application/json" \
+            -d '{"carrier":"AA","origin":"JFK","dest":"LAX","flight_date":"2025-07-15","dep_hour":17}'
+          echo
+          docker rm -f candidate > /dev/null
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -140,6 +182,39 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "${IMAGE_NAME}:${{ github.sha }}" \
             --output none
+
+      # The health check below goes through the app's public URL, and Container Apps
+      # keeps routing that URL to the previous revision until the new one is ready. A
+      # revision that never starts therefore passes it, because the old one answers.
+      # Waiting on the new revision by name is what proves this image is serving.
+      - name: Wait for the new revision to become ready
+        run: |
+          REVISION=$(az containerapp show --name "$CONTAINER_APP" \
+                      --resource-group "$AZURE_RESOURCE_GROUP" \
+                      --query properties.latestRevisionName -o tsv)
+          echo "Waiting for $REVISION"
+          for attempt in $(seq 1 40); do
+            READY=$(az containerapp show --name "$CONTAINER_APP" \
+                     --resource-group "$AZURE_RESOURCE_GROUP" \
+                     --query properties.latestReadyRevisionName -o tsv)
+            STATE=$(az containerapp revision show --name "$CONTAINER_APP" \
+                     --resource-group "$AZURE_RESOURCE_GROUP" --revision "$REVISION" \
+                     --query properties.runningState -o tsv)
+            if [ "$READY" = "$REVISION" ]; then
+              echo "$REVISION is ready ($STATE) after $attempt check(s)."
+              exit 0
+            fi
+            if [ "$STATE" = "ActivationFailed" ] || [ "$STATE" = "Failed" ]; then
+              echo "::error::$REVISION failed to activate ($STATE)"
+              az containerapp logs show --name "$CONTAINER_APP" \
+                --resource-group "$AZURE_RESOURCE_GROUP" --revision "$REVISION" \
+                --type console --tail 50 || true
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "::error::$REVISION was not ready within 10 minutes (last state: $STATE)"
+          exit 1
 
       - name: Wait for the new revision to serve traffic
         run: |
